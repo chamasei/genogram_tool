@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>ジェノグラム作成ツール（ローカル実行用）</title>
+  <style>
+    :root{ 
+      --cell:80px;
+      --gap:0px;
+      --font: system-ui,"Noto Sans JP",sans-serif;
+      --grid-color:#eee;       /* 既存の薄いグリッド */
+      --group-color:#6a8e9c;   /* 囲み線の色 */
+      --group-width:2px;       /* 囲み線の太さ */
+      --group-corner: 13;      /* 角丸の半径(px) */
+    }
+    *{ box-sizing:border-box }
+    body{ margin:16px; font-family:var(--font); background:#fafafa; color:#222 }
+    .toolbar{ display:flex; gap:8px; align-items:center; margin-bottom:12px }
+    .board{ 
+      display:grid; 
+      grid-template-columns:repeat(20,var(--cell)); 
+      grid-template-rows:repeat(20,var(--cell));
+      gap:var(--gap); 
+      position:relative;
+      z-index: 10;
+      margin:0 auto; 
+      width:max-content; 
+      border:1px solid #eee;
+      background:
+      linear-gradient(to right, rgba(0,0,0,.06) 1px, transparent 1px) 0 0 / var(--cell) var(--cell),
+      linear-gradient(to bottom, rgba(0,0,0,.06) 1px, transparent 1px) 0 0 / var(--cell) var(--cell);
+    }
+    .cell{
+      width:var(--cell);
+      height:var(--cell);
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      cursor:pointer;
+      user-select:none;
+      position:relative;
+      box-sizing:border-box;
+    }
+    .cell .frame {
+      position: absolute;
+      inset: 0;                 /* セルいっぱいに重ねる */
+      border: 0 solid transparent;
+      pointer-events: none;     /* クリック透過 */
+      box-sizing: border-box;   /* 念のため */
+    }
+    .cell img{ max-width:100%; max-height:100%; object-fit:contain; display:block; pointer-events:none }
+    .menu{ position:absolute; background:#fff; border:1px solid #ddd; border-radius:8px; box-shadow:0 10px 24px rgba(0,0,0,.16);
+           padding:8px; display:none; min-width:220px; z-index:90 }
+    .menu-grid{ display:grid; grid-template-columns:repeat(2, 1fr); gap:6px }
+    .menu-item{ display:flex; align-items:center; gap:8px; padding:6px; border-radius:8px; cursor:pointer; border:1px solid transparent }
+    .menu-item:hover{ background:#f6f9ff; border-color:#e1ecff }
+    .menu-item img{ width:28px; height:28px; object-fit:contain }
+    .status{ position:fixed; right:12px; bottom:12px; background:#000; color:#fff; font:12px/1.6 var(--font);
+             padding:6px 8px; border-radius:8px; opacity:.6; z-index:80 }
+
+    /* 注記 */
+    .notes{ position:absolute; inset:0; pointer-events:none; z-index:70 }
+    .note{ position:absolute; min-width:36px; min-height:20px; padding:2px 6px; font-size:12px; background:#fff; border:1px solid #bbb;
+           border-radius:4px; box-shadow:0 1px 2px rgba(0,0,0,.06); pointer-events:auto; cursor:move; user-select:none }
+    .note[contenteditable="true"]{ cursor:text }
+    .note:focus{ outline:2px solid #9ecbff; outline-offset:2px }
+    .note-tools{ position:absolute; display:none; gap:6px; padding:2px; background:#fff; border:1px solid #ddd; border-radius:6px;
+                 box-shadow:0 4px 12px rgba(0,0,0,.12); z-index:70 }
+    .note-tools button{ font:inherit; font-size:12px; padding:2px 6px; cursor:pointer }
+    #boardWrap { position: relative; transform-origin: 0 0; }
+    #groupSVG {position:absolute; inset:0; z-index:55; pointer-events:none; }
+    #groupSVG * { pointer-events:none !important; }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <button id="zoomOutBtn">－</button>
+    <span id="zoomLabel">100%</span>
+    <button id="zoomInBtn">＋</button>
+    <span id="hint" style="font-size:12px;color:#666"></span>
+    <button id="noteBtn">テキスト</button>
+    <button id="groupBtn">同居グループ</button>
+  </div>
+
+  <div id="boardWrap" style="position:relative;width:max-content;margin:0 auto;">
+    <div id="board" class="board" aria-label="20x20 grid"></div>
+    <svg id="groupSVG" width="0" height="0" style="position:absolute;inset:0;pointer-events:none;overflow:visible"></svg>
+    <div id="notes" class="notes"></div>
+    <div class="menu" id="menu"></div>
+    <div class="note-tools" id="tools"><button data-act="bigger">A＋</button><button data-act="smaller">A−</button><button data-act="delete">🗑</button></div>
+  </div>
+  <div class="status" id="status">mode: normal / menu: closed</div>
+
+<script>
+  const wrap = document.getElementById('boardWrap');
+  const zoomInBtn  = document.getElementById('zoomInBtn');
+  const zoomOutBtn = document.getElementById('zoomOutBtn');
+  const zoomLabel  = document.getElementById('zoomLabel');
+  const board = document.getElementById('board');
+  const menu  = document.getElementById('menu');
+  const notes = document.getElementById('notes');
+  const tools = document.getElementById('tools');
+  const statusEl = document.getElementById('status');
+  const noteBtn  = document.getElementById('noteBtn');
+  const hintEl   = document.getElementById('hint');
+  const groupBtn = document.getElementById('groupBtn');
+  const groupSVG = document.getElementById('groupSVG');
+
+  // ===== SVG サイズ同期 =====
+  function fitSVG(){
+    const w = board.clientWidth, h = board.clientHeight;
+    groupSVG.setAttribute('width',  w);
+    groupSVG.setAttribute('height', h);
+    groupSVG.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  }
+  window.fitSVG = fitSVG;
+
+  // ===== 状態 =====
+  const state = {
+    noteMode: false,
+    menuOpen: false,
+    rows: 20,
+    cols: 20,
+    scale: 1,
+    _toolsHold: false,
+    groupMode: false
+  };
+  const groupSet = new Set();
+
+  // ===== ズーム =====
+  function setScale(s){
+    state.scale = Math.max(0.5, Math.min(2, s));
+    wrap.style.transform = `scale(${state.scale})`;
+    if (zoomLabel) zoomLabel.textContent = Math.round(state.scale*100) + '%';
+    window.fitSVG && window.fitSVG();
+    if (state.menuOpen && activeCell) openMenu(activeCell);
+    if (focusedNote) showTools(focusedNote);
+  }
+  if (zoomInBtn)  zoomInBtn.addEventListener('click', ()=> setScale(state.scale + 0.1));
+  if (zoomOutBtn) zoomOutBtn.addEventListener('click', ()=> setScale(state.scale - 0.1));
+
+  // ===== メニュー用画像ラベル =====
+  const IMG_DIR = 'img';
+  const LABELS = [
+    '（なし）',
+    '女性','女性没','女性本人',
+    '男性','男性没','男性本人',
+    'T','逆さT','縦線','横線','十字','二重線',
+    'バツ有り線','バツ有り二重線',
+    '兄弟左端','兄弟右端'
+  ];
+  const toSrc = (label)=> (label && label !== '（なし）') ? `${IMG_DIR}/${label}.png` : '';
+
+  // ===== ステータス =====
+  function setStatus(){ statusEl.textContent = `mode: ${state.noteMode?'note':'normal'} / menu: ${state.menuOpen?'open':'closed'}` }
+  setInterval(setStatus, 300);
+
+  // ===== 盤生成 =====
+  function buildBoard(rows, cols){
+    board.innerHTML = '';
+    const frag = document.createDocumentFragment();
+    for(let r=0;r<rows;r++){
+      for(let c=0;c<cols;c++){
+        const cell = document.createElement('div');
+        cell.className = 'cell';
+        const frame = document.createElement('div');
+        frame.className = 'frame';
+        cell.appendChild(frame);
+        frag.appendChild(cell);
+      }
+    }
+    board.appendChild(frag);
+  }
+
+  // ===== ポップアップメニュー =====
+  let activeCell = null;
+let onDocClose = null, onEscClose = null;
+let menuOpenAt = 0;  // guard to avoid immediate close after open
+  function buildMenu(){
+    const wrapEl = document.createElement('div');
+    wrapEl.className = 'menu-grid';
+    LABELS.forEach(label=>{
+      const item = document.createElement('div');
+      item.className = 'menu-item';
+      const icon = document.createElement('img');
+      if(label !== '（なし）'){
+        icon.src = toSrc(label);
+        icon.onerror = ()=>{ icon.removeAttribute('src'); icon.alt='×'; };
+      }
+      const txt = document.createElement('div'); txt.textContent = label;
+      item.appendChild(icon); item.appendChild(txt);
+      item.addEventListener('click', ()=>{ applyImageToCell(activeCell, label); closeMenu(); });
+      wrapEl.appendChild(item);
+    });
+    menu.innerHTML = '';
+    menu.appendChild(wrapEl);
+  }
+  function openMenu(cell){
+    if(state.noteMode) return;
+    activeCell = cell;
+    const rectP = wrap.getBoundingClientRect();
+    const rectC = cell.getBoundingClientRect();
+    const left = (rectC.left   - rectP.left)  / state.scale;
+    const top  = (rectC.bottom - rectP.top )  / state.scale;
+    menu.style.left = left + 'px';
+    menu.style.top  = top  + 'px';
+    if(!menu.firstChild) buildMenu();
+    menu.style.display = 'block';
+    state.menuOpen = true;
+
+    // 既存リスナを念のため除去→付け直し
+    if(onDocClose){ document.removeEventListener('click', onDocClose); onDocClose=null; }
+    if(onEscClose){ document.removeEventListener('keydown', onEscClose); onEscClose=null; }
+
+    menuOpenAt = performance.now();
+    onDocClose = (ev)=>{
+      // 開いた直後の同一クリックで即閉じるのを防止
+      if (performance.now() - menuOpenAt < 80) return;
+      if(!menu.contains(ev.target)) closeMenu();
+    };
+    onEscClose = (ev)=>{ if(ev.key==='Escape') closeMenu(); };
+    setTimeout(()=>{
+      document.addEventListener('click', onDocClose, {capture:true});
+      document.addEventListener('keydown', onEscClose);
+    },0);
+  }
+  function closeMenu(){
+    menu.style.display = 'none';
+    state.menuOpen = false;
+    if(onDocClose){ document.removeEventListener('click', onDocClose); onDocClose=null; }
+    if(onEscClose){ document.removeEventListener('keydown', onEscClose); onEscClose=null; }
+  }
+  function applyImageToCell(cell, label){
+    const prev = cell.querySelector('img');
+    if (prev) prev.remove();
+    if(label === '（なし）') return;
+    const img = document.createElement('img');
+    img.src = toSrc(label);
+    img.alt = label;
+    img.onerror = ()=>{ img.remove(); };
+    cell.appendChild(img);
+  }
+
+  // ===== 注記（テキスト） =====
+  const notesEl = notes; // alias
+  let focusedNote = null;
+  noteBtn.addEventListener('click', ()=>{
+    state.noteMode = !state.noteMode;
+    noteBtn.textContent = state.noteMode ? 'テキスト（解除）' : 'テキスト';
+    hintEl.textContent  = state.noteMode ? '盤面をクリックして注記を追加 / Escで解除' : '';
+    
+  });
+
+  document.addEventListener('keydown', (e)=>{
+    if(e.key==='Escape' && state.noteMode){ state.noteMode=false; noteBtn.textContent='テキスト'; hintEl.textContent=''; }
+  });
+
+  function createNote(x,y){
+    const div = document.createElement('div');
+    div.className = 'note';
+    div.textContent = '';
+    div.setAttribute('contenteditable','true');
+    div.style.fontSize = '12px';
+    div.style.pointerEvents = 'auto';
+
+    // ノートのクリック・ドラッグ・削除
+    div.addEventListener('mousedown', e=> e.stopPropagation());
+    div.addEventListener('click',     e=> e.stopPropagation());
+    div.addEventListener('focus', ()=>{ focusedNote = div; showTools(div); });
+    div.addEventListener('blur', ()=>{
+      if (state._toolsHold) { setTimeout(()=>div.focus(), 0); return; }
+      const empty = div.textContent.trim() === '';
+      setTimeout(()=>{
+        if (!div.isConnected) return;
+        if (empty){ if (focusedNote===div){ hideTools(); focusedNote=null; } safeRemove(div); return; }
+        if (document.activeElement !== div){ hideTools(); if (focusedNote===div) focusedNote=null; }
+      },0);
+    });
+
+    notesEl.appendChild(div);
+    requestAnimationFrame(()=>{
+      setNotePos(div, x - div.offsetWidth/2, y - div.offsetHeight/2);
+      setTimeout(()=>div.focus(), 50);
+      enableDrag(div);
+    });
+  }
+
+  function setNotePos(el,x,y){ el.style.left=x+'px'; el.style.top=y+'px'; }
+  function enableDrag(el){
+    let dragging=false, sx=0, sy=0, ox=0, oy=0;
+    const onDown=(cx,cy)=>{ dragging=true; const r=el.getBoundingClientRect(), p=board.getBoundingClientRect(); ox=r.left-p.left; oy=r.top-p.top; sx=cx; sy=cy; el.setAttribute('contenteditable','false'); document.addEventListener('mousemove',onMove); document.addEventListener('mouseup',onUp); document.addEventListener('touchmove',onTMove,{passive:false}); document.addEventListener('touchend',onTEnd); };
+    const onMove=(e)=>{ if(!dragging) return; const dx=(e.clientX-sx)/state.scale, dy=(e.clientY-sy)/state.scale; setNotePos(el, ox+dx, oy+dy); showTools(el); };
+    const onUp =()=>{ dragging=false; el.setAttribute('contenteditable','true'); setTimeout(()=>el.focus(),0); document.removeEventListener('mousemove',onMove); document.removeEventListener('mouseup',onUp); document.removeEventListener('touchmove',onTMove); document.removeEventListener('touchend',onTEnd); };
+    const onTStart=(e)=>{ const t=e.touches[0]; onDown(t.clientX,t.clientY); };
+    const onTMove =(e)=>{ e.preventDefault(); const t=e.touches[0]; onMove(t); };
+    const onTEnd  =()=> onUp();
+    el.addEventListener('mousedown',(e)=>{ e.preventDefault(); onDown(e.clientX,e.clientY); });
+    el.addEventListener('touchstart', onTStart,{passive:false});
+  }
+  function showTools(el){
+    const r=el.getBoundingClientRect(), p=wrap.getBoundingClientRect();
+    const left=(r.right-p.left)/state.scale+6, top=(r.top-p.top)/state.scale-6;
+    tools.style.left=left+'px'; tools.style.top=Math.max(0,top)+'px'; tools.style.display='inline-flex';
+  }
+  function hideTools(){ tools.style.display='none'; }
+  tools.addEventListener('mousedown', ()=>{ state._toolsHold=true; setTimeout(()=> state._toolsHold=false,0); });
+  tools.addEventListener('click', (e)=>{
+    const btn = e.target.closest('button'); if(!btn || !focusedNote) return;
+    const act = btn.dataset.act;
+    if(act==='bigger') changeFont(focusedNote, +1);
+    if(act==='smaller') changeFont(focusedNote, -1);
+    if(act==='delete'){ const n=focusedNote; hideTools(); focusedNote=null; safeRemove(n); }
+  });
+  function safeRemove(el){ if(!el) return; if(el.isConnected && el.parentNode){ el.parentNode.removeChild(el); } }
+  function changeFont(el,delta){ const cur=parseFloat(getComputedStyle(el).fontSize)||12; const next=Math.max(8, Math.min(28, cur+delta)); el.style.fontSize=next+'px'; showTools(el); setTimeout(()=>el.focus(),0); }
+
+  // ===== ユーティリティ =====
+  function getCellSize(){ return parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--cell').trim()); }
+  function resizeGroupSVG(){ fitSVG(); }
+  function clearGroupSVG(){ while(groupSVG.firstChild) groupSVG.firstChild.remove(); }
+
+  // ===== グリッド生成 =====
+  function ptKey(x,y){ return x+'_'+y; }
+
+  // ===== グループ選択・外周抽出 =====
+  function addEdge(set,a,b){
+    const k = (a[0]<b[0] || (a[0]===b[0] && a[1]<b[1]))
+      ? `${a[0]},${a[1]}>${b[0]},${b[1]}`
+      : `${b[0]},${b[1]}>${a[0]},${a[1]}`;
+    if (set.has(k)) set.delete(k); else set.add(k);
+  }
+  function edgesFromGroup(){
+    const edges=new Set(), cell=getCellSize(), cols=state.cols, rows=state.rows;
+    const has=(r,c)=> r>=0&&r<rows&&c>=0&&c<cols && groupSet.has(r*cols+c);
+    groupSet.forEach(key=>{
+      const r=(key/cols|0), c=key%cols, x=c*cell, y=r*cell;
+      if(!has(r-1,c)) addEdge(edges,[x,y],[x+cell,y]);             // 上
+      if(!has(r+1,c)) addEdge(edges,[x,y+cell],[x+cell,y+cell]);   // 下
+      if(!has(r,c-1)) addEdge(edges,[x,y],[x,y+cell]);             // 左
+      if(!has(r,c+1)) addEdge(edges,[x+cell,y],[x+cell,y+cell]);   // 右
+    });
+    return edges;
+  }
+  function pathsFromEdges(edges){
+    const adj=new Map();
+    for(const k of edges){
+      const [a,b]=k.split('>');
+      const A=a.split(',').map(Number), B=b.split(',').map(Number);
+      const ka=`${A[0]}_${A[1]}`, kb=`${B[0]}_${B[1]}`;
+      (adj.get(ka)||adj.set(ka,[]).get(ka)).push(B);
+      (adj.get(kb)||adj.set(kb,[]).get(kb)).push(A);
+    }
+    const used=new Set(), loops=[];
+    for(const k of edges){
+      if(used.has(k)) continue;
+      let [a,b]=k.split('>');
+      let cur=a.split(',').map(Number), nxt=b.split(',').map(Number);
+      const start=`${cur[0]}_${cur[1]}`;
+      const loop=[cur,nxt]; used.add(k);
+      while(`${nxt[0]}_${nxt[1]}`!==start){
+        const opts=adj.get(`${nxt[0]}_${nxt[1]}`)||[];
+        const prev=cur;
+        const cand=opts.find(p=>p[0]!==prev[0]||p[1]!==prev[1]);
+        if(!cand) break;
+        const ekey=(nxt[0]<cand[0] || (nxt[0]===cand[0] && nxt[1]<cand[1]))
+          ? `${nxt[0]},${nxt[1]}>${cand[0]},${cand[1]}`
+          : `${cand[0]},${cand[1]}>${nxt[0]},${nxt[1]}`;
+        used.add(ekey);
+        cur=nxt; nxt=cand; loop.push(nxt);
+        if(loop.length>10000) break;
+      }
+      if(loop.length>=3) loops.push(loop);
+    }
+    return loops;
+  }
+
+  // ===== パス整形（角丸の前に簡易スナップ＆簡約） =====
+  function simplifyPath(pts){
+    // 連続する同一点除去
+    const out=[]; for(let i=0;i<pts.length;i++){ const p=pts[i], q=pts[(i-1+pts.length)%pts.length]; if(p[0]!==q[0]||p[1]!==q[1]) out.push(p); }
+    // 直線（同一直線上の中間点）を間引き
+    const simp=[]; for(let i=0;i<out.length;i++){
+      const a=out[(i-1+out.length)%out.length], b=out[i], c=out[(i+1)%out.length];
+      const colinear = (a[0]===b[0] && b[0]===c[0]) || (a[1]===b[1] && b[1]===c[1]);
+      if(!colinear) simp.push(b);
+    }
+    return simp;
+  }
+  function asAxisAlignedRect(pts){
+    const uniq = simplifyPath(pts);
+    if (uniq.length !== 4) return null;
+    const xs = uniq.map(p=>p[0]), ys = uniq.map(p=>p[1]);
+    const minX=Math.min(...xs), maxX=Math.max(...xs), minY=Math.min(...ys), maxY=Math.max(...ys);
+    const set = new Set(uniq.map(p=>p.join(',')));
+    const need=[[minX,minY],[maxX,minY],[maxX,maxY],[minX,maxY]].map(p=>p.join(','));
+    for(const k of need) if(!set.has(k)) return null;
+    // 辺が必ず軸平行か
+    for(let i=0;i<4;i++){ const a=uniq[i], b=uniq[(i+1)%4]; if(!(a[0]===b[0]||a[1]===b[1])) return null; }
+    return {x:minX, y:minY, w:maxX-minX, h:maxY-minY};
+  }
+
+  // ===== 角丸パス生成 =====
+  function roundedPath(points,R){
+    const pts = simplifyPath(points);
+    const n = pts.length; if(n<3) return '';
+    const cell = getCellSize();
+    const rMax = Math.max(0, Math.min(R, cell/2 - 1));
+    const cutIn=new Array(n), cutOut=new Array(n);
+    for(let i=0;i<n;i++){
+      const p0=pts[(i-1+n)%n], p1=pts[i], p2=pts[(i+1)%n];
+      const vIn=[p1[0]-p0[0], p1[1]-p0[1]]; const vOut=[p2[0]-p1[0], p2[1]-p1[1]];
+      const lenIn=Math.hypot(vIn[0],vIn[1]); const lenOut=Math.hypot(vOut[0],vOut[1]);
+      if(!lenIn||!lenOut){ cutIn[i]=p1; cutOut[i]=p1; continue; }
+      const rr=Math.min(rMax, lenIn/2, lenOut/2);
+      const inN=[vIn[0]/lenIn, vIn[1]/lenIn]; const outN=[vOut[0]/lenOut, vOut[1]/lenOut];
+      cutIn[i]=[p1[0]-inN[0]*rr, p1[1]-inN[1]*rr];
+      cutOut[i]=[p1[0]+outN[0]*rr, p1[1]+outN[1]*rr];
+    }
+    const d=[]; d.push('M', cutOut[0][0], cutOut[0][1]);
+    for(let i=1;i<n;i++){ d.push('L', cutIn[i][0], cutIn[i][1]); d.push('Q', pts[i][0], pts[i][1], cutOut[i][0], cutOut[i][1]); }
+    d.push('L', cutIn[0][0], cutIn[0][1]); d.push('Q', pts[0][0], pts[0][1], cutOut[0][0], cutOut[0][1]); d.push('Z');
+    return d.join(' ');
+  }
+
+  // ===== 描画 =====
+  function drawPaths(paths){
+    while(groupSVG.firstChild) groupSVG.firstChild.remove();
+    const rr  = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--group-corner')) || 12;
+    const sw  = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--group-width'))  || 2;
+    const col = getComputedStyle(document.documentElement).getPropertyValue('--group-color') || '#2a7b9b';
+
+    for(const raw of paths){
+      const pts = simplifyPath(raw);
+      const rect = asAxisAlignedRect(pts);
+      if(rect){
+        const r = Math.min(rr, rect.w/2 - 1, rect.h/2 - 1);
+        const el = document.createElementNS('http://www.w3.org/2000/svg','rect');
+        el.setAttribute('x', rect.x); el.setAttribute('y', rect.y);
+        el.setAttribute('width', rect.w); el.setAttribute('height', rect.h);
+        el.setAttribute('rx', r); el.setAttribute('ry', r);
+        el.setAttribute('fill','none'); el.setAttribute('stroke', col);
+        el.setAttribute('stroke-width', sw);
+        el.setAttribute('stroke-linecap','round'); el.setAttribute('stroke-linejoin','round');
+        groupSVG.appendChild(el);
+        continue;
+      }
+      const d = roundedPath(pts, rr);
+      if(!d) continue;
+      const p = document.createElementNS('http://www.w3.org/2000/svg','path');
+      p.setAttribute('d', d);
+      p.setAttribute('fill','none'); p.setAttribute('stroke', col); p.setAttribute('stroke-width', sw);
+      p.setAttribute('stroke-linecap','round'); p.setAttribute('stroke-linejoin','round'); p.setAttribute('stroke-miterlimit','1');
+      groupSVG.appendChild(p);
+    }
+  }
+
+  window.recomputeGroupBorders = function(){
+    // 既存 frame のボーダーは消去して SVG のみ使用
+    for (let i=0;i<board.children.length;i++){
+      const frame = board.children[i].querySelector('.frame');
+      if(frame){ frame.style.borderTop=frame.style.borderRight=frame.style.borderBottom=frame.style.borderLeft='0 solid transparent'; }
+    }
+    fitSVG();
+    const edges = edgesFromGroup();
+    const loops = pathsFromEdges(edges);
+    drawPaths(loops);
+  };
+
+  // ===== クリック処理 =====
+  board.addEventListener('click', (e)=>{
+    if (e.target.classList.contains('note') || e.target.closest('.note')) {
+      e.stopPropagation();
+      return;
+    }
+
+    const cell = e.target.closest('.cell');
+    const rect = board.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / (state.scale || 1);
+    const y = (e.clientY - rect.top ) / (state.scale || 1);
+
+    if (state.groupMode && cell){
+      const i = Array.prototype.indexOf.call(board.children, cell);
+      const r = Math.floor(i / state.cols), c = i % state.cols;
+      const key = r*state.cols + c;
+      if (groupSet.has(key)) groupSet.delete(key); else groupSet.add(key);
+      recomputeGroupBorders();
+      return;
+    }
+    if (state.noteMode && !state.menuOpen){ createNote(x,y); return; }
+    if (cell){
+      // メニューの“開いた直後に即閉じる”を防ぐため伝播停止＋一旦閉じ→開き直し
+      e.stopPropagation();
+      if (state.menuOpen) closeMenu();
+      openMenu(cell);
+    }
+  });
+
+  // ===== トグルボタン =====
+  groupBtn.addEventListener('click', ()=>{
+    state.groupMode = !state.groupMode;
+    groupBtn.textContent = state.groupMode ? '同居グループ（解除）' : '同居グループ';
+  });
+
+  // ===== 初期化 =====
+  buildBoard(state.rows, state.cols);
+  fitSVG();
+  setScale(1);
+  window.addEventListener('resize', ()=>{ fitSVG(); });
+</script>
+</body>
+</html>
